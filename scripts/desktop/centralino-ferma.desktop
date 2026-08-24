@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spegni il telefono
+Comment=Ferma centralino, provisioning e assistente vocale
+Exec=/home/pi/bin/centralino-ferma.sh
+Icon=call-stop
+Terminal=true
+Categories=Utility;

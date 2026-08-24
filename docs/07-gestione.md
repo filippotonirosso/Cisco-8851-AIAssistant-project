@@ -142,3 +142,33 @@ trascrizione.
 
 Le frasi fisse sono sintetizzate **una volta sola** e riusate: è il motivo per
 cui esiste `build-sounds.py` invece di generarle al volo.
+
+## Accensione manuale con due pulsanti
+
+Se preferisci che il sistema **non parta da solo** all'accensione del Pi — utile
+quando l'apparecchio non serve tutti i giorni, o per non lasciare servizi in
+ascolto senza motivo — si tolgono i servizi dall'avvio automatico e si mettono
+due icone sul desktop.
+
+```bash
+sudo systemctl disable asterisk tftpd-hpa phone-http meet-dashboard
+```
+
+In `scripts/desktop/` ci sono i due script e i relativi lanciatori `.desktop`:
+copiali in `~/bin/` e `~/Desktop/`, rendili eseguibili.
+
+**Accendi** avvia i quattro servizi, riattiva i promemoria e **attende la
+registrazione del telefono**, confermandola a schermo: è la differenza fra "ho
+lanciato dei comandi" e "il sistema funziona".
+
+**Spegni** ferma tutto. Prima sospende i promemoria, così nessuna consegna parte
+durante l'arresto, e avvisa se ci sono chiamate in corso invece di troncarle.
+
+I promemoria non si fermano fermando un servizio: il cron è installato in
+permanenza. Sono governati da un file-interruttore,
+`/var/lib/asterisk/assistente-attivo`: se manca, `deliver-reminders.py` esce
+subito. Il cron continua a girare ogni minuto ma non fa nulla, in pochi
+millisecondi.
+
+> Il telefono non funziona finché non premi Accendi: senza Asterisk non si
+> registra, e senza TFTP non trova la configurazione se lo riavvii.

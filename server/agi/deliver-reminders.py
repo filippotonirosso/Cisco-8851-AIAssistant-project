@@ -7,6 +7,11 @@ sys.path.insert(0, "/var/lib/asterisk/agi-bin")
 import assistant_lib as L
 import reminders as R
 
+# Interruttore generale: se il centralino e' spento non si consegna nulla.
+# Il cron resta installato e gira a vuoto in pochi millisecondi.
+if not os.path.exists("/var/lib/asterisk/assistente-attivo"):
+    raise SystemExit(0)
+
 keys = L.load_keys()
 for item in R.due():
     if R.deliver(item, keys):

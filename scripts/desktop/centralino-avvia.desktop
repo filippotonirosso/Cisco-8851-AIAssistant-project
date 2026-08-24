@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Accendi il telefono
+Comment=Avvia centralino, provisioning e assistente vocale
+Exec=/home/pi/bin/centralino-avvia.sh
+Icon=call-start
+Terminal=true
+Categories=Utility;
