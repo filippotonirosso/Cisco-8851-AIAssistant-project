@@ -1,0 +1,14 @@
+[Unit]
+Description=Schermata di riposo del CP-8851
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /var/lib/asterisk/agi-bin/dashboard.py
+User=asterisk
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

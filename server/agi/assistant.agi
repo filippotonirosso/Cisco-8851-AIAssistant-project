@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""
+Assistente vocale per il CP-8851 — l'intera chiamata e' gestita qui.
+
+Scelte che contano:
+  - nessun beep: si apre con un saluto parlato, che dice anche "tocca a te"
+  - mentre il modello elabora, un thread separato lavora e il principale
+    riproduce riempitivi: l'attesa viene coperta, non solo accorciata
+  - premendo un tasto qualsiasi si interrompe la riproduzione
+  - frasi tipo "chiudi", "basta", "arrivederci" chiudono la chiamata
+
+HTTP grezzo e sola stdlib: il Pi ha Python 3.7, l'SDK anthropic vuole 3.10+.
+"""
+import json
+import os
+import re
+import sys
+import threading
+
+sys.path.insert(0, "/var/lib/asterisk/agi-bin")
+import assistant_lib as L
+
+WORKDIR = "/tmp"
+BARGE_DIGITS = "0123456789*#"
+SILENCE = 1              # secondi di pausa che chiudono il turno (era 2)
+MAX_TURN = 20            # durata massima di un singolo intervento
+
+# Chiusura per parola chiave: piu' rapida e prevedibile che farla decidere
+# al modello, e funziona anche se le API sono giu'.
+CLOSE_EXACT = {"chiudi", "chiudiamo", "basta", "arrivederci", "riaggancia",
+               "stop", "fine", "chiudi la chiamata", "ciao ciao", "a dopo"}
+CLOSE_RE = re.compile(r"\b(chiudi|riaggancia|arrivederci|basta cosi)\b", re.I)
+
+
+def wants_close(text):
+    t = re.sub(r"[^\w\s]", "", (text or "").strip().lower())
+    if t in CLOSE_EXACT:
+        return True
+    # "ciao" e "grazie" chiudono solo se detti da soli, se no sono convenevoli
+    if t in ("ciao", "grazie", "grazie mille", "ok grazie"):
+        return True
+    return bool(CLOSE_RE.search(t))
+
+
+class AGI:
+    def __init__(self):
+        self.env = {}
+        while True:
+            line = sys.stdin.readline().strip()
+            if not line:
+                break
+            if ":" in line:
+                k, _, v = line.partition(":")
+                self.env[k.strip()] = v.strip()
+
+    def cmd(self, command):
+        sys.stdout.write(command + "\n")
+        sys.stdout.flush()
+        return sys.stdin.readline().strip()
+
+    @staticmethod
+    def _result(resp):
+        m = re.search(r"result=(-?\d+)", resp or "")
+        return int(m.group(1)) if m else -1
+
+    def play(self, path_no_ext, interruptible=True):
+        """Ritorna: 0 riprodotto tutto, >0 tasto premuto, -1 riagganciato."""
+        digits = BARGE_DIGITS if interruptible else ""
+        return self._result(self.cmd('STREAM FILE "%s" "%s"' % (path_no_ext, digits)))
+
+    def record(self, path_no_ext):
+        # senza la parola BEEP non emette alcun tono
+        # wav16: il canale e' in banda larga, registrare a 8 kHz peggiorerebbe
+        # anche la trascrizione
+        resp = self.cmd('RECORD FILE "%s" wav16 "#" %d 0 s=%d'
+                        % (path_no_ext, MAX_TURN * 1000, SILENCE))
+        return self._result(resp), resp
+
+    def hangup(self):
+        self.cmd("HANGUP")
+
+    def set_var(self, name, value):
+        return self.cmd('SET VARIABLE %s "%s"' % (name, value))
+
+
+class Worker(threading.Thread):
+    """STT -> modello -> sintesi, fuori dal thread che parla al telefono."""
+
+    def __init__(self, wav, history, keys, out_base):
+        super().__init__(daemon=True)
+        self.wav, self.history, self.keys, self.out_base = wav, history, keys, out_base
+        self.progress = {"stato": "pensa"}
+        self.audio = None       # file pronto da riprodurre
+        self.text = None        # cosa ha detto l'utente
+        self.answer = None
+
+    def run(self):
+        try:
+            self.text = L.transcribe(self.wav, self.keys)
+            if not self.text:
+                return
+            if wants_close(self.text):
+                return          # non serve scomodare il modello per un saluto
+            self.answer = L.think(self.text, self.history, self.keys, self.progress)
+            if self.answer:
+                self.progress["stato"] = "voce"
+                self.audio = L.synth(self.answer, self.out_base, self.keys)
+        except Exception as exc:
+            L.log("worker: %s" % exc)
+
+
+def bump_silence(uid, reset=False):
+    """Turni muti consecutivi. Serve a non lasciare una chiamata viva per sempre
+    se la cornetta resta sganciata."""
+    f = os.path.join(WORKDIR, "silence-%s" % uid)
+    n = 0
+    if not reset:
+        try:
+            n = int(open(f).read().strip())
+        except Exception:
+            n = 0
+        n += 1
+    try:
+        open(f, "w").write(str(n))
+    except OSError:
+        pass
+    return n
+
+
+def snd(name):
+    return os.path.join(L.SOUNDS, name)
+
+
+def main():
+    """Un turno soltanto: ascolta, elabora, consegna il file al dialplan.
+
+    La riproduzione della risposta NON avviene qui: la fa il dialplan con
+    BackgroundDetect, che e' l'unico modo in Asterisk di suonare un file
+    restando in ascolto e fermarsi quando l'utente ricomincia a parlare.
+    """
+    agi = AGI()
+    uid = agi.env.get("agi_uniqueid", "x")
+    L.log("AGI avviato, uid=%s" % uid)
+    keys = L.load_keys()
+    filler_i = 0
+
+    agi.set_var("ASSIST_FILE", "")
+    agi.set_var("ASSIST_ACTION", "")
+
+    hist_file = os.path.join(WORKDIR, "conv-%s.json" % uid)
+    history = []
+    if os.path.exists(hist_file):
+        try:
+            history = json.load(open(hist_file))
+        except Exception:
+            history = []
+
+    rec_base = os.path.join(WORKDIR, "ask-%s" % uid)
+    res, _ = agi.record(rec_base)
+    if res == -1:
+        return
+
+    raw = rec_base + ".wav16"
+    wav = rec_base + ".wav"
+    if os.path.exists(raw):
+        try:
+            os.rename(raw, wav)      # stesso contenuto, nome che l'API riconosce
+        except OSError:
+            pass
+    # silenzio: si torna ad ascoltare senza dire nulla. Rispondere "non ho
+    # capito" a chi non ha parlato lo fa ripetere all'infinito.
+    # Silenzio: si torna semplicemente ad ascoltare. Nessuna chiusura
+    # automatica: se non parli non parte alcuna trascrizione, quindi non
+    # consuma nulla, e un assistente che riaggancia da solo e' irritante.
+    if not os.path.exists(wav) or os.path.getsize(wav) < 16000:
+        return
+
+    out_base = os.path.join(WORKDIR, "reply-%s" % uid)
+    for ext in (".sln16", ".wav16", ".wav"):
+        try:
+            os.remove(out_base + ext)
+        except OSError:
+            pass
+
+    worker = Worker(wav, history, keys, out_base)
+    worker.start()
+
+    # attesa di grazia: se la risposta arriva in fretta non si dice nulla.
+    # Solo se tarda si segnala presenza, al massimo due volte: il silenzio
+    # al telefono sembra una caduta, ma un riempitivo ogni due secondi irrita.
+    # Attesa di grazia: se risponde in fretta non si dice nulla. Poi si
+    # accompagna l'attesa senza mai lasciare buchi di silenzio lunghi, usando
+    # la frase pertinente a cio' che sta facendo in quel momento.
+    worker.join(timeout=1.2)
+    detti = {}
+    while worker.is_alive():
+        stato = worker.progress.get("stato", "pensa")
+        frasi = L.FILLERS_STATO.get(stato)
+        if frasi:
+            k = detti.get(stato, 0)
+            nome = "filler-%s-%d" % (stato, k % len(frasi))
+            detti[stato] = k + 1
+        else:
+            nome = "filler-%d" % (filler_i % len(L.FILLERS))
+            filler_i += 1
+        if agi.play(snd(nome)) == -1:
+            return
+        worker.join(timeout=1.5)
+    worker.join()
+
+    try:
+        os.remove(wav)
+    except OSError:
+        pass
+
+    if worker.text:
+        bump_silence(uid, reset=True)
+
+    if worker.text and wants_close(worker.text):
+        agi.set_var("ASSIST_ACTION", "hangup")
+        return
+
+    try:
+        json.dump(history[-20:], open(hist_file, "w"))
+    except Exception:
+        pass
+
+    if worker.audio:
+        agi.set_var("ASSIST_FILE", worker.audio)
+    elif worker.text:
+        agi.set_var("ASSIST_FILE", snd("sorry"))   # ha parlato ma qualcosa e' fallito
+    # nessun parlato riconosciuto: si tace e si torna ad ascoltare
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        L.log("errore fatale: %s" % exc)

@@ -1,0 +1,8 @@
+assistant-keys.conf
+phone-auth.txt
+*.sln16
+*.wav
+*.wav16
+reminders.json
+google-token.json
+__pycache__/

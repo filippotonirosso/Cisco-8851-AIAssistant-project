@@ -1,0 +1,2 @@
+# Consegna dei promemoria: fa squillare il telefono all orario giusto
+* * * * * asterisk /usr/bin/python3 /var/lib/asterisk/agi-bin/deliver-reminders.py >/dev/null 2>&1

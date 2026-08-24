@@ -1,0 +1,15 @@
+# Copiare in /etc/asterisk/assistant-keys.conf
+# Proprietario asterisk:asterisk, permessi 600. NON versionare il file compilato.
+
+ANTHROPIC_API_KEY=
+ELEVENLABS_API_KEY=
+# opzionale: se vuoto viene usata la prima voce dell account
+ELEVENLABS_VOICE_ID=
+
+# --- Google OAuth (Gmail lettura + bozze, Calendar lettura) ---
+# CLIENT_ID e CLIENT_SECRET: console.cloud.google.com > Credentials >
+#   OAuth 2.0 Client ID di tipo "Desktop app"
+# REFRESH_TOKEN: ottenuto una volta sola con scripts/google-auth.py
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REFRESH_TOKEN=
